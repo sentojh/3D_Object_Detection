@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "io.grpc.custom.Disinfection.RemoteCam";
+option java_outer_classname = "RemoteCamProto";
+option objc_class_prefix = "FDDO";
+
+package RemoteCamProto;
+
+service RemoteCamProto {
+    rpc GetImage(GetImageRequest) returns (GetImageResponse) {}
+}
+
+message GetImageRequest {     // Planning Master -> Cam Server
+    int32 request_id = 1;      // for request-response coupling, no practical use
+}
+
+message GetImageResponse {    // Cam Server -> Planning Master
+    int32 response_id = 1;      // for request-response coupling, no practical use
+    int32 width = 2;
+    int32 height = 3;
+    repeated int32 color = 4 [packed=true];
+    repeated int32 depth = 5 [packed=true];
+}
