@@ -6,29 +6,22 @@ import pyrealsense2 as rs
 import numpy as np
 import open3d as o3d
 import time
-from collections import namedtuple
-from .heuristics import *
-from ..camera.kinect import Kinect
-from ..camera.realsense import RealSense
-from ..camera.camera_interface import CameraInterface
-from ..detector_interface import DetectorInterface
-from ...geometry.geotype import GEOTYPE
-from ...utils.rotation_utils import *
-from ...utils.utils import TextColors
-
-from concurrent import futures
 import logging
 import math
-import time
-import cv2
-import numpy as np
+
+from collections import namedtuple
+from .heuristics import *
+from ..utils.rotation_utils import *
+from ..utils.utils import TextColors
+from concurrent import futures
 import grpc
 from .grpc_cam import RemoteCam_pb2
 from .grpc_cam import RemoteCam_pb2_grpc
 
-MAX_MESSAGE_LENGTH = 100000000
-GRPC_PORT = 10509
-HOST_IP = "192.168.17.2"
+# MAX_MESSAGE_LENGTH = 100000000
+# GRPC_PORT = 10509
+# HOST_IP = "192.168.17.2"
+
 
 ##
 # @class ColorDepthMap
@@ -57,6 +50,7 @@ def cdp2pcd(cdp, Tc=None, depth_trunc=10.0):
                                                              *cdp.intrins), SE3_inv(Tc))
     return pcd
 
+
 ##
 # @param pcd point cloud
 # @param voxel_size voxel size of downsampling
@@ -76,6 +70,7 @@ def preprocess_point_cloud(pcd, voxel_size):
         o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=200))
     return pcd_down, pcd_fpfh
 
+
 ##
 # @param source source point cloud
 # @param target target point cloud
@@ -92,131 +87,121 @@ def draw_registration_result(source, target, transformation, option_geos=[]):
     o3d.visualization.draw_geometries([source_temp, target_temp, FOR_origin, FOR_target]+option_geos)
 
 
+def draw_registration_result_original_color(source, target, transformation):
+    source_temp = copy.deepcopy(source)
+    source_temp.transform(transformation)
+    FOR_origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=[0, 0, 0])
+
+    FOR_model = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=[0, 0, 0])
+    FOR_model.transform(transformation)
+    FOR_model.translate(source_temp.get_center() - FOR_model.get_center())
+
+    FOR_target = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=target.get_center())
+    o3d.visualization.draw_geometries([source_temp, target, FOR_origin, FOR_model, FOR_target])
+
 ##
-# @class    MultiICP
+# @param cdp ColorDepthMap
+# @param mask segmented result from object detection algorithm
+def apply_mask(cdp, mask):
+    mask_u8 = np.zeros_like(mask).astype(np.uint8)
+    mask_u8[np.where(mask)] = 255
+    color_masked = cv2.bitwise_and(cdp.color, cdp.color, mask=mask_u8).astype(np.uint8)
+    depth_masked = cv2.bitwise_and(cdp.depth, cdp.depth, mask=mask_u8).astype(np.uint16)
+    return ColorDepthMap(color_masked, depth_masked, cdp.intrins, cdp.depth_scale)
+
+
+
+##
+# @class    3d_Detector
 # @brief    camera module with multi ICP for 3D object detection
 #           Must call initialize/disconnect before/after usage.
 #           If "Couldn't resolve requests" error is raised, check if it is connected with USB3.
 #           You can check by running realsense-viewer from the terminal.
-class MultiICP:
-    ##
-    # @param camera     subclass instances of CameraInterface (realsense or kinect)
-    def __init__(self, camera):
-        self.camera = camera
+class Detector_Client:
+    def __init__(self, HOST_IP="localhost", PORT=10509, MAX_MESSAGE_LENGTH=10000000):
+        self.HOST_IP = HOST_IP
+        self.PORT = PORT
+        self.MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
         self.img_dim = (720, 1280)
-        # self.img_dim = (1080, 1920)
         self.ratio = 0.3
         self.thres_ICP = 0.15
         self.thres_front_ICP = 0.10
         self.config_list = []
         self.micp_dict = {}
         self.objectPose_dict = {}
-        self.gscene = None
-        self.crob = None
         self.sd = None
         self.visualize = False
         self.cache = None
-        self.pcd_total = None
 
         self.multiobject_num = 1
         self.merge_mask = False
-        self.remote_cam = False
         self.outlier_removal = None
         self.rmse_thres = 0.1
-
+        self.initial_list = {}
+        print("Initialize Done")
 
 
     ##
-    # @brief initialize camera and set camera configuration
-    def initialize(self, config_list=None, img_dim=None, remote_cam=False):
-        if self.camera is None:
-            if remote_cam:
-               self.remote_cam = remote_cam
-               print("Camera is not set - skip initialization, use remote camera")
-
-               # get camera config from remote camera
-               with grpc.insecure_channel('{}:{}'.format(HOST_IP, GRPC_PORT)) as channel:
-                   stub = RemoteCam_pb2_grpc.RemoteCamProtoStub(channel)
-                   request_id = 0
-                   resp = stub.GetConfig(RemoteCam_pb2.GetConfigRequest(request_id=request_id))
-                   print("request {} -> response {}".format(request_id, resp.response_id))
-                   cam_mtx = np.array(resp.camera_matrix).reshape((3, 3))
-                   dist_coeffs = np.array(resp.dist_coeffs).reshape((5,))
-                   depth_scale = resp.depth_scale
-                   width = resp.width
-                   height = resp.height
-                   print("==== Received camera config from remote camera ====")
-                   self.config_list = [cam_mtx, dist_coeffs, depth_scale]
-                   self.img_dim = (height, width)
-                   self.dsize = tuple(reversed(self.img_dim))
-                   self.h_fov_hf = np.arctan2(self.img_dim[1], 2 * self.config_list[0][0, 0])
-                   self.v_fov_hf = np.arctan2(self.img_dim[0], 2 * self.config_list[0][1, 1])
-            else:
-                print("Camera is not set - skip initialization, use manually given camera configs")
-                assert config_list is not None and img_dim is not None, "config_list and img_dim must be given for no-cam mode"
-                self.config_list = config_list
-                self.img_dim = img_dim
-                self.dsize = tuple(reversed(img_dim))
-                self.h_fov_hf = np.arctan2(self.img_dim[1], 2 * config_list[0][0, 0])
-                self.v_fov_hf = np.arctan2(self.img_dim[0], 2 * config_list[0][1, 1])
-                return
-        else:
-            self.camera.initialize()
-            cameraMatrix, distCoeffs, depth_scale = self.camera.get_config()
-            self.config_list = [cameraMatrix, distCoeffs, depth_scale]
-            self.img_dim = self.camera.get_image().shape[:2]
-            res_scale = np.max(np.ceil(np.divide(np.array(self.img_dim, dtype=float), 2000) / 2).astype(int) * 2)
-            self.dsize = tuple(reversed(np.divide(self.img_dim, res_scale).astype(int)))
-            self.h_fov_hf = np.arctan2(self.img_dim[1], 2*cameraMatrix[0,0])
-            self.v_fov_hf = np.arctan2(self.img_dim[0], 2*cameraMatrix[1,1])
-            print("Initialize Done")
-
-    ##
-    # @brief disconnect camera
-    def disconnect(self):
-        if self.camera is not None:
-            self.camera.disconnect()
-
-    ##
-    # @brief   get camera configuration
-    # @return  cameraMatrix 3x3 camera matrix in pixel units,
-    # @return  distCoeffs distortion coefficients, 5~14 float array
-    # @return  depthscale scale of depth value
+    # @brief     get camera streaming configuration
+    # @return    camera matrix
+    # @return    distortion coeffs
+    # @return    depth scale
     def get_camera_config(self):
-        return self.config_list
+        with grpc.insecure_channel('{}:{}'.format(self.HOST_IP, self.PORT)) as channel:
+            stub = RemoteCam_pb2_grpc.RemoteCamProtoStub(channel)
+            request_id = 0
+            resp = stub.GetConfig(RemoteCam_pb2.GetConfigRequest(request_id=request_id))
+            # print("request {} -> response {}".format(request_id, resp.response_id))
+            print("======= Success to receive camera config =======")
+            cam_mtx = np.array(resp.camera_matrix).reshape((3, 3))
+            dist_coeffs = np.array(resp.dist_coeffs).reshape((5,))
+            depth_scale = resp.depth_scale
+            # width = resp.width
+            # height = resp.height
+
+        # self.config_list = [cam_mtx, dist_coeffs, depth_scale]
+        return [cam_mtx, dist_coeffs, depth_scale]
 
     ##
-    # @brief   get aligned RGB image and depthmap
+    # @brief   set camera fov
+    def set_fov(self):
+        self.h_fov_hf = np.arctan2(self.img_dim[1], 2 * self.config_list[0][0, 0])
+        self.v_fov_hf = np.arctan2(self.img_dim[0], 2 * self.config_list[0][1, 1])
+
+
+    ##
+    # @brief    get color, depth image from remote camera server
+    # @retrun   color image
+    # @retrun   depth image
     def get_image(self):
-        if not self.remote_cam:
-            color_image, depth_image = self.camera.get_image_depthmap()
-        else:
-            with grpc.insecure_channel('{}:{}'.format(HOST_IP, GRPC_PORT),
-                                       options=[('grpc.max_send_message_length', MAX_MESSAGE_LENGTH),
-                                                ('grpc.max_receive_message_length', MAX_MESSAGE_LENGTH)]) as channel:
-                stub = RemoteCam_pb2_grpc.RemoteCamProtoStub(channel)
-                request_id = 0
-                resp = stub.GetImageDepthmap(RemoteCam_pb2.GetImageDepthmapRequest(request_id=request_id))
-                print("request {} -> response {}".format(request_id, resp.response_id))
-                color_image = np.array(resp.color).reshape((resp.height, resp.width, 3))
-                depth_image = np.array(resp.depth).reshape((resp.height, resp.width))
-                print("==== Received color, depth image from remote camera ====")
-                self.img_dim = (resp.height, resp.width)
-        Q = self.crob.get_real_robot_pose()
-        return color_image, depth_image, Q
+        with grpc.insecure_channel('{}:{}'.format(self.HOST_IP, self.PORT),
+                                   options=[('grpc.max_send_message_length', self.MAX_MESSAGE_LENGTH),
+                                            ('grpc.max_receive_message_length', self.MAX_MESSAGE_LENGTH)]) as channel:
+            stub = RemoteCam_pb2_grpc.RemoteCamProtoStub(channel)
+            request_id = 0
+            resp = stub.GetImageDepthmap(RemoteCam_pb2.GetImageDepthmapRequest(request_id=request_id))
+            # print("request {} -> response {}".format(request_id, resp.response_id))
+            print(" ======= Success to receive color, depth image =======")
+            color = np.array(resp.color).reshape((resp.height, resp.width, 3)).astype(np.uint8)
+            depth = np.array(resp.depth).reshape((resp.height, resp.width))
+
+        self.color_img = color
+        self.depth_img = depth
+        self.img_dim = (resp.width, resp.height)
+        self.set_fov()
+        return color, depth
+
 
     ##
-    # @brief  add micp_dict, hrule_dict, combined robot, geometry scene and shared detector
-    # @param  micp_dict MultiICP class for each object
-    # @param  sd   shared detector to detect object
-    # @param  crob   CombinedRobot
-    # @param  viewpoint     GeometryItem for viewpoint
-    def set_config(self, micp_dict, sd, crob, viewpoint):
+    # @brief  add micp_dict, shared detector and ICP initial list
+    # @param  micp_dict  MultiICP class for each object
+    # @param  sd         shared detector to detect object
+    # @param  initials   Initial transformation for each object
+    def set_config(self, micp_dict, sd, initials):
         self.micp_dict = micp_dict
-        self.crob = crob
         self.sd = sd
-        self.viewpoint = viewpoint
-        self.gscene = viewpoint.gscene
+        self.initial_list = initials
+
 
     ##
     # @brief  add arbitrary color, depth image and joint value
@@ -226,6 +211,7 @@ class MultiICP:
     def cache_sensor(self, color_image, depth_image, Q):
         self.cache = color_image, depth_image, Q
 
+
     ##
     # @brief change threshold value to find correspondenc pair during ICP
     # @param  thres_ICP     setting value of threshold
@@ -234,11 +220,13 @@ class MultiICP:
         self.thres_ICP = thres_ICP
         self.thres_front_ICP = thres_front_ICP
 
+
     ##
     # @abrief set the number of object which has multiple instance
     # @param  num     setting value of num
     def set_multiobject_num(self, num=1):
         self.multiobject_num = num
+
 
     ##
     # @brief  set merget option of masks for one object
@@ -263,29 +251,20 @@ class MultiICP:
     def set_inlier_ratio(self, ratio=0.1):
         self.inlier_thres = ratio
 
+
     ##
     # @brief    detect 3D objects pose
     # @param    name_mask   object names to detect
     # @param    level_mask  list of rnb-planning.src.pkg.detector.detector_interface.DetectionLevel
     # @param    visualize   visualize the detection result, especially visualization in Open3D during ICP
-    def detect(self, name_mask=None, level_mask=None, visualize=False):
-        if level_mask is not None:
-            name_mask_level = self.get_targets_of_levels(level_mask)
-            if name_mask is not None:
-                name_mask = list(set(name_mask).intersection(set(name_mask_level)))
-            else:
-                name_mask = name_mask_level
-        print("name_mask is {}".format(name_mask))
-
-        if self.crob is None:
-            TextColors.YELLOW.println("[WARN] CombinedRobot is not set: call set_config()")
-            return {}
-
-        if self.cache is None:
-            color_image, depth_image, Q = self.get_image()
+    def detect(self, sd, Tc=None, name_mask=None, visualize=False):
+        if name_mask is None:
+            print("[WARN] name_mask is not designated")
         else:
-            color_image, depth_image, Q = self.cache
-            self.cache = None
+            print("[INFO] name_mask is {}".format(name_mask))
+
+        # obtain color, depth image
+        color_image, depth_image = self.get_image()
         camera_mtx = self.config_list[0]
         cam_intrins = [self.img_dim[1], self.img_dim[0],
                        camera_mtx[0, 0], camera_mtx[1, 1],
@@ -293,15 +272,16 @@ class MultiICP:
         depth_scale = self.config_list[2]
 
         cdp = ColorDepthMap(color_image, depth_image, cam_intrins, depth_scale)
-        if len(Q) == 13:
-            Tc = self.viewpoint.get_tf(Q)
-        elif len(Q) == 4:
-            Tc = Q
+
+        # If Tc is not given, then the image is w.r.t camera coordinate
+        if Tc is None:
+            Tc = np.identity(4)
         T_cb = SE3_inv(Tc)
+
         self.objectPose_dict = {}
 
         if self.sd is None:
-            TextColors.YELLOW.println("[WARN] SharedDetector is not set: call set_config()")
+            TextColors.YELLOW.println("[WARN] SharedDetector is not set")
             return {}
 
 
@@ -377,19 +357,22 @@ class MultiICP:
                         skip_normal_icp = False
                         multi_init_icp = False
                         Tguess = None
-                        if name in self.gscene.NAME_DICT:  # if the object exists in gscene, use it as initial
-                            g_handle = self.gscene.NAME_DICT[name]
-                            print("\n'{}' is already in gscene. Use this to intial guess\n".format(name))
-                            Tbo = g_handle.get_tf(Q)
-                            Tguess = np.matmul(T_cb, Tbo)
-                            skip_normal_icp = True
-                        else: # if the object not exists in gscene, use grule
-                            if micp.grule is not None: # if grule is defined by user
-                                print("\n'{}' is not in gscene. Use manual input for initial guess\n".format(name))
-                                Tguess = micp.grule.get_initial(micp.pcd)
-                            else: # if grule is not defined by user, then use multi initial for ICP
-                                print("\n'{}' is not in gscene. Use multiple initial guess\n".format(name))
-                                multi_init_icp = True
+                        if name in self.initial_list.keys():
+                            print("\n Use intial guess of '{}'\n".format(name))
+                            Tguess = self.initial_list[name]
+                        # if name in self.gscene.NAME_DICT:  # if the object exists in gscene, use it as initial
+                        #     g_handle = self.gscene.NAME_DICT[name]
+                        #     print("\nUse intial guess for ICP\n".format(name))
+                        #     Tbo = g_handle.get_tf(Q)
+                        #     Tguess = np.matmul(T_cb, Tbo)
+                        #     skip_normal_icp = True
+                        # else: # if the object not exists in gscene, use grule
+                        #     if micp.grule is not None: # if grule is defined by user
+                        #         print("\n'{}' is not in gscene. Use manual input for initial guess\n".format(name))
+                        #         Tguess = micp.grule.get_initial(micp.pcd)
+                        #     else: # if grule is not defined by user, then use multi initial for ICP
+                        #         print("\n'{}' is not in gscene. Use multiple initial guess\n".format(name))
+                        #         multi_init_icp = True
 
                         skip_detection = False
                         # Compute ICP, front iCP
@@ -519,77 +502,27 @@ class MultiICP:
         self.last_input = color_image, depth_image, Q, cam_intrins, depth_scale
         return self.objectPose_dict
 
-    ##
-    # @brief    list registered targets of specific detection level
-    # @param    detection_level list of target detection levels
-    # @return   names list of target names
-    def get_targets_of_levels(self, detection_levels=None):
-        names = []
-        for name, info in self.micp_dict.items():
-            obj_info = info.get_info()
-            if obj_info.dlevel in detection_levels:
-                names.append(name)
-        return names
 
     ##
-    # @brief    Acquire geometry kwargs of item
-    # @param    name    item name
-    # @return   kwargs  kwargs if name is available object name. None if not available.
-    def get_geometry_kwargs(self, name):
-        if "_" in name:
-            name_cat = name.split("_")[0]
-        else:
-            name_cat = name
-        if name_cat not in self.micp_dict:
-            return None
-        micp = self.micp_dict[name_cat]
-        model = micp.model
-        return dict(gtype=GEOTYPE.MESH, name=name_cat,
-                    dims=(0.1, 0.1, 0.1), color=(0.8, 0.8, 0.8, 1),
-                    display=True, fixed=True, collision=False,
-                    vertices=np.matmul(np.asarray(model.vertices), micp.Toff_inv[:3,:3].transpose())+micp.Toff_inv[:3,3],
-                    triangles=np.asarray(model.triangles))
-
-    ##
-    # @brief    add axis marker to GeometryHandle
-    def add_item_axis(self, gscene, hl_key, item, axis_name=None):
-        oname = item.oname
-        axis_name = axis_name or oname
-        if oname in gscene.NAME_DICT:
-            aobj = gscene.NAME_DICT[oname]
-            link_name = aobj.link_name
-            Toff = np.matmul(aobj.Toff, item.Toff)
-        else:
-            link_candis = list(set([lname for lname in gscene.link_names
-                                    if oname in lname
-                                    and lname in [child_pair[1]
-                                                  for child_pair
-                                                  in gscene.urdf_content.child_map["base_link"]]
-                                    ]))
-            if len(link_candis) == 0:
-                link_name = "base_link"
-            elif len(link_candis) == 1:
-                link_name = link_candis[0]
-            else:
-                raise(RuntimeError("Multiple object link candidates - marker link cannot be determined"))
-            Toff = item.Toff
-        gscene.add_highlight_axis(hl_key, axis_name, link_name, Toff[:3,3], Toff[:3,:3], axis="xyz")
-
-    ##
-    # @brief resize and inference image
-    def inference(self, color_img):
-        img_res = cv2.resize(color_img, dsize=self.dsize)
+    # @brief    object detection through CasCade MaskRCNN
+    # @param    sd          shared detector object
+    # @param    color_img   color image to detect
+    # @retrun   masks for each object class
+    def inference(self, sd, color_img):
+        img_res = cv2.resize(color_img, dsize=self.img_dim)
         mask_out_list_res = self.sd.inference(color_img=img_res)
         mask_out_list = np.zeros((80,) + tuple(color_img.shape[:2]), dtype=mask_out_list_res.dtype)
+
         for idx in range(80):
             if np.any(mask_out_list_res[idx]):
-                for i_obj in range(1, np.max(mask_out_list_res[idx])+1):
+                for i_obj in range(1, np.max(mask_out_list_res[idx]) + 1):
                     mask_res = (cv2.resize((mask_out_list_res[idx] == i_obj).astype(np.uint8) * 255,
-                                           dsize=tuple(reversed(self.img_dim)), interpolation=cv2.INTER_AREA
+                                           dsize=self.img_dim, interpolation=cv2.INTER_AREA
                                            ).astype(float) / 255
                                 ).astype(np.uint8) * i_obj
-                    mask_out_list[idx][np.where(mask_res>0)] = mask_res[np.where(mask_res>0)]
+                    mask_out_list[idx][np.where(mask_res > 0)] = mask_res[np.where(mask_res > 0)]
         return mask_out_list
+
 
    ##
     # @brief generate multiple initials for ICP
@@ -649,8 +582,10 @@ class MultiICP_Obj:
     def get_info(self):
         return self.obj_info
 
+
     def get_rule(self):
         return self.hrule, self.grule
+
 
     ##
     # @brief add model mesh
@@ -661,16 +596,17 @@ class MultiICP_Obj:
         model_info = self.obj_info
         if model_info.Toff is None:
             self.Toff = np.identity(4)
-            self.Toff_inv = SE3_inv(self.Toff)
         else:
             self.Toff = model_info.Toff
-            self.Toff_inv = SE3_inv(self.Toff)
+        self.Toff_inv = SE3_inv(self.Toff)
+
 
     ##
     # @brief reset pcd and set reference coordinate
     def reset(self, Tref=None):
         self.clear()
         self.Tref = Tref
+
 
     ##
     # @briref change reference coordinate and transform pcd & pose
@@ -680,6 +616,7 @@ class MultiICP_Obj:
             np.matmul(Trr0[:3, :3], np.asarray(self.pcd.points).T).T + Trr0[:3, 3])
         self.pose = np.matmul(Trr0, self.pose)
         self.Tref = Tref_new
+
 
     ##
     # @brief add pcd from image, sampled pcd from mesh.
@@ -710,6 +647,7 @@ class MultiICP_Obj:
             # self.model_sampled = self.model.sample_points_uniformly(number_of_points=2000)
             return False
         return True
+
 
     ##
     # @param To    initial transformation matrix of geometry object in the intended icp origin coordinate
@@ -1012,11 +950,13 @@ class MultiICP_Obj:
         self.reg_p2p = reg_p2p
         return ICP_result, reg_p2p.inlier_rmse, inlier_ratio
 
+
     def draw(self, To, source=None, target=None, option_geos=[]):
         if source is None: source = self.model_sampled
         if target is None: target = self.pcd
         To = np.matmul(To, self.Toff_inv)
         draw_registration_result(source, target, To, option_geos)
+
 
     def auto_init(self, init_idx=0, voxel_size=0.04):
         pcd_cam, Tc, _ = self.pcd_Tc_stack[init_idx]
@@ -1036,33 +976,13 @@ class MultiICP_Obj:
         To = matmul_series(Tc, result.transformation, self.Toff)
         return To, result.fitness
 
+
     def clear(self):
         self.pcd = None
         self.pcd_Tc_stack = []
         self.cdp = None
         self.model_sampled = None
 
-def draw_registration_result_original_color(source, target, transformation):
-    source_temp = copy.deepcopy(source)
-    source_temp.transform(transformation)
-    FOR_origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=[0, 0, 0])
-
-    FOR_model = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=[0, 0, 0])
-    FOR_model.transform(transformation)
-    FOR_model.translate(source_temp.get_center() - FOR_model.get_center())
-
-    FOR_target = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=target.get_center())
-    o3d.visualization.draw_geometries([source_temp, target, FOR_origin, FOR_model, FOR_target])
-
-##
-# @param cdp ColorDepthMap
-# @param mask segmented result from object detection algorithm
-def apply_mask(cdp, mask):
-    mask_u8 = np.zeros_like(mask).astype(np.uint8)
-    mask_u8[np.where(mask)] = 255
-    color_masked = cv2.bitwise_and(cdp.color, cdp.color, mask=mask_u8).astype(np.uint8)
-    depth_masked = cv2.bitwise_and(cdp.depth, cdp.depth, mask=mask_u8).astype(np.uint16)
-    return ColorDepthMap(color_masked, depth_masked, cdp.intrins, cdp.depth_scale)
 
 # @brief adjust T upright around roi pcd center
 def fit_vertical(T_bc, Tbo, pcd_roi, height=0):
