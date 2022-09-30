@@ -4,9 +4,7 @@ import numpy as np
 import copy
 import open3d as o3d
 from enum import Enum
-from ..aruco.detector import *
-from ...geometry.geometry import GEOTYPE
-from ...utils.rotation_utils import *
+from ..utils.rotation_utils import *
 from abc import abstractmethod
 
 # Class dictionary for object detection & segmentation
@@ -26,28 +24,28 @@ class_dict = {'person':0, 'bicycle':1, 'car':2, 'motorcycle':3, 'airplane':4, 'b
 
 class ObjectInfo:
     ##
-    # @param name  name of object
-    # @param dlevel detection level
-    # @param gtype geometry type
-    # @param dims  geometry dimensions
-    # @param color geometry visualization color
-    # @param Toff
-    def __init__(self, name, dlevel, gtype=None, dims=None, color=None, Toff=None,
+    # @param name   name of object
+    # @param dims   geometry dimensions
+    # @param color  geometry visualization color
+    # @param Toff   offset of coordinate frame
+    def __init__(self, name, dims=None, color=None, Toff=None,
                  scale=[1e-3,1e-3,1e-3], url=None):
         if color is None:
             color = (0.6,0.6,0.6,1)
-        self.name, self.dlevel, self.gtype = name, dlevel, gtype
+        self.name = name
         self.dims, self.color = dims, color
         self.Toff = Toff
         self.scale = scale
         self.url = url
+        self.detection_network = True
 
-    def get_geometry_kwargs(self):
-        ##
-        # @brief get kwargs to create geometry item
-        return dict(gtype=self.gtype, dims=self.dims, color=self.color,
-                    fixed=DetectionLevel.is_fixed(self.dlevel), online=self.dlevel==DetectionLevel.ONLINE,
-                    Toff=self.Toff)
+        if name in class_dict.keys():
+            # object which is able to detect through Mask RCNN
+            self.detection_network = True
+        else:
+            # object which is not able to detect through Mask RCNN
+            self.detection_network = False
+
 
 ##
 # @class InitializeRule
