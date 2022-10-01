@@ -10,7 +10,7 @@ import logging
 import math
 
 from collections import namedtuple
-from .heuristics import *
+# from .heuristics import *
 from ..utils.rotation_utils import *
 from ..utils.utils import TextColors
 from concurrent import futures
@@ -138,7 +138,9 @@ class Detector_Client:
         self.outlier_removal = None
         self.rmse_thres = 0.1
         self.initial_list = {}
-        print("Initialize Done")
+
+        self.config_list = self.get_camera_config()
+        print("======= Initialize Done =======")
 
 
     ##
@@ -152,14 +154,14 @@ class Detector_Client:
             request_id = 0
             resp = stub.GetConfig(RemoteCam_pb2.GetConfigRequest(request_id=request_id))
             # print("request {} -> response {}".format(request_id, resp.response_id))
-            print("======= Success to receive camera config =======")
+            # print("======= Success to receive camera config =======")
             cam_mtx = np.array(resp.camera_matrix).reshape((3, 3))
             dist_coeffs = np.array(resp.dist_coeffs).reshape((5,))
             depth_scale = resp.depth_scale
             # width = resp.width
             # height = resp.height
 
-        # self.config_list = [cam_mtx, dist_coeffs, depth_scale]
+        self.config_list = [cam_mtx, dist_coeffs, depth_scale]
         return [cam_mtx, dist_coeffs, depth_scale]
 
     ##
@@ -193,14 +195,19 @@ class Detector_Client:
 
 
     ##
-    # @brief  add micp_dict, shared detector and ICP initial list
+    # @brief  add micp_dict, ICP initial list
     # @param  micp_dict  MultiICP class for each object
-    # @param  sd         shared detector to detect object
     # @param  initials   Initial transformation for each object
-    def set_config(self, micp_dict, sd, initials):
+    def set_config(self, micp_dict, initials):
         self.micp_dict = micp_dict
-        self.sd = sd
         self.initial_list = initials
+
+
+    ##
+    # @brief  add shared detector
+    # @param  sd     shared detector to detect object
+    def set_shared_detector(self, sd):
+        self.sd = sd
 
 
     ##

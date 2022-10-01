@@ -5,12 +5,14 @@ import time
 import os
 import sys
 import subprocess
-RNB_PLANNING_DIR = os.environ["RNB_PLANNING_DIR"]
-sys.path.append(os.path.join(os.path.join(RNB_PLANNING_DIR, 'src')))
+
+DETECTOR_DIR = os.path.join(os.environ["HOME"], "Projects/3D_Object_Detection/")
+sys.path.append(os.path.join(os.path.join(DETECTOR_DIR, "src/")))
+
 if sys.version.startswith("3"):
     from pkg.utils.utils_python3 import *
     try:
-        from mmdet.apis import init_detector, inference_detector
+        from pkg.detector.mmdet.apis import init_detector, inference_detector
     except Exception as e:
         print(TextColors.RED.println("[ERROR] Could not import mmdet"))
         raise(e)
@@ -26,9 +28,9 @@ RESP_URI = "shm://response"
 
 # IMG_DIM = (1080, 1920, 3)
 
-FILE_PATH = os.path.join(RNB_PLANNING_DIR, 'src/pkg/detector/multiICP/shared_detector.py')
+FILE_PATH = os.path.join(DETECTOR_DIR, 'src/pkg/detector/shared_detector.py')
 
-def SharedDetectorGen(IMG_DIM=(720, 1280, 3)):
+def SharedDetectorGenerator(IMG_DIM=(720, 1280, 3)):
     if __name__ != "__main__":
         output = subprocess.Popen(['python3', FILE_PATH, "--dims", str(IMG_DIM)], cwd=os.path.dirname(FILE_PATH))
     class SharedDetector:
@@ -40,9 +42,9 @@ def SharedDetectorGen(IMG_DIM=(720, 1280, 3)):
             if not self.initizlied:
                 self.initizlied = True
                 # Load config, checkpoint file of cascade mask rcnn swin based
-                config_file = os.path.join(RNB_PLANNING_DIR,
+                config_file = os.path.join(DETECTOR_DIR,
                                            'model/mmdet/configs/swin/cascade_mask_rcnn_swin_base_patch4_window7_mstrain_480-800_giou_4conv1f_adamw_3x_coco.py')
-                checkpoint_file = os.path.join(RNB_PLANNING_DIR,
+                checkpoint_file = os.path.join(DETECTOR_DIR,
                                                'model/mmdet/cascade_mask_rcnn_swin_base_patch4_window7.pth')
 
                 device = 'cuda:0'
@@ -99,6 +101,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     img_dims = tuple(map(int, args.dims[1:-1].split(",")))
-    sdet = SharedDetectorGen(img_dims)()
+    sdet = SharedDetectorGenerator(img_dims)()
     set_serving(True)
     serve_forever("SharedDetector", [sdet.inference, sdet.init], verbose=True)
