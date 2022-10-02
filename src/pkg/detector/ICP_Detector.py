@@ -81,8 +81,8 @@ def draw_registration_result(source, target, transformation, option_geos=[]):
     source_temp.paint_uniform_color([1, 0.706, 0])
     target_temp.paint_uniform_color([0, 0.651, 0.929])
     source_temp.transform(transformation)
-    FOR_origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=[0, 0, 0])
-    FOR_target = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=transformation[:3,3])
+    FOR_origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
+    FOR_target = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=transformation[:3,3])
     FOR_target.rotate(transformation[:3,:3])
 
     o3d.visualization.draw_geometries([source_temp, target_temp, FOR_origin, FOR_target]+option_geos)
@@ -91,13 +91,13 @@ def draw_registration_result(source, target, transformation, option_geos=[]):
 def draw_registration_result_original_color(source, target, transformation):
     source_temp = copy.deepcopy(source)
     source_temp.transform(transformation)
-    FOR_origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=[0, 0, 0])
+    FOR_origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
 
-    FOR_model = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=[0, 0, 0])
+    FOR_model = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
     FOR_model.transform(transformation)
     FOR_model.translate(source_temp.get_center() - FOR_model.get_center())
 
-    FOR_target = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=target.get_center())
+    FOR_target = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=target.get_center())
     o3d.visualization.draw_geometries([source_temp, target, FOR_origin, FOR_model, FOR_target])
 
 ##
@@ -292,7 +292,7 @@ class Detector_Client:
         # process point cloud
         pcd_copy = copy.deepcopy(micp.pcd.uniform_down_sample(every_k_points=10))
         pcd_np = np.asarray(pcd_copy.points)
-        pcd_copy.points = o3d.utility.Vector3dVector(cut_pcd(name_mask, pcd_np))
+        # pcd_copy.points = o3d.utility.Vector3dVector(cut_pcd(name_mask, pcd_np))
         micp.pcd = pcd_copy
 
         micp.model = load_model(name_mask)
