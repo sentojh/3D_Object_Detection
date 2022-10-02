@@ -10,7 +10,7 @@ import logging
 import math
 
 from collections import namedtuple
-# from .heuristics import *
+from .heuristics import *
 from ..utils.rotation_utils import *
 from ..utils.utils import TextColors
 from concurrent import futures
@@ -82,7 +82,8 @@ def draw_registration_result(source, target, transformation, option_geos=[]):
     target_temp.paint_uniform_color([0, 0.651, 0.929])
     source_temp.transform(transformation)
     FOR_origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=[0, 0, 0])
-    FOR_target = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=target.get_center())
+    FOR_target = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15, origin=transformation[:3,3])
+    FOR_target.rotate(transformation[:3,:3])
 
     o3d.visualization.draw_geometries([source_temp, target_temp, FOR_origin, FOR_target]+option_geos)
 
@@ -185,7 +186,7 @@ class Detector_Client:
             # print("request {} -> response {}".format(request_id, resp.response_id))
             print(" ======= Success to receive color, depth image =======")
             color = np.array(resp.color).reshape((resp.height, resp.width, 3)).astype(np.uint8)
-            depth = np.array(resp.depth).reshape((resp.height, resp.width))
+            depth = np.array(resp.depth).reshape((resp.height, resp.width)).astype(np.uint16)
 
         self.color_img = color
         self.depth_img = depth
@@ -257,6 +258,57 @@ class Detector_Client:
 
     def set_inlier_ratio(self, ratio=0.1):
         self.inlier_thres = ratio
+
+
+    ##
+    def detect_plane(self, Tguess=None, Tc=None, name_mask=None, visualize=False):
+        if name_mask is None:
+            print("[WARN] name_mask is not designated")
+            return {}
+        else:
+            print("[INFO] name_mask is {}".format(name_mask))
+
+        # obtain color, depth image
+        color_image, depth_image = self.get_image()
+        camera_mtx = self.config_list[0]
+        cam_intrins = [self.img_dim[1], self.img_dim[0],
+                       camera_mtx[0, 0], camera_mtx[1, 1],
+                       camera_mtx[0, 2], camera_mtx[1, 2]]
+        depth_scale = self.config_list[2]
+
+        cdp = ColorDepthMap(color_image, depth_image, cam_intrins, depth_scale)
+
+        # If Tc is not given, then the image is w.r.t camera coordinate
+        if Tc is None:
+            Tc = np.identity(4)
+        T_cb = SE3_inv(Tc)
+
+        # target object
+        micp = self.micp_dict[name_mask]
+        micp.clear()
+        micp.reset(Tref=Tc)
+        micp.make_pcd(cdp, ratio=self.ratio)
+
+        # process point cloud
+        pcd_copy = copy.deepcopy(micp.pcd.uniform_down_sample(every_k_points=10))
+        pcd_np = np.asarray(pcd_copy.points)
+        pcd_copy.points = o3d.utility.Vector3dVector(cut_pcd(name_mask, pcd_np))
+        micp.pcd = pcd_copy
+
+        micp.model = load_model(name_mask)
+        micp.model.compute_vertex_normals()
+        micp.model_sampled = micp.model.sample_points_uniformly(
+            number_of_points=int(len(np.array(micp.pcd.points)) * self.ratio))
+
+        if Tguess is None:
+            Tguess = np.identity(4)
+            Tguess[:3,3] = micp.pcd.get_center()
+            Tguess[:3,:3] = Rot_axis(1, np.pi)
+
+        T, inlier_rmse, inlier_ratio = micp.compute_ICP(To=Tguess, thres=self.thres_ICP,
+                                                        outlier_remove=self.outlier_removal, visualize=visualize)
+
+        return T
 
 
     ##

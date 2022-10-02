@@ -22,6 +22,23 @@ class_dict = {'person':0, 'bicycle':1, 'car':2, 'motorcycle':3, 'airplane':4, 'b
               'clock':74, 'vase':75, 'scissors':76, 'teddy bear':77, 'hair drier':78, 'toothbrush':79}
 
 
+##
+#
+def cut_pcd(name, pcd_np):
+    if name == "couch":
+        # x, y cutting
+        pcd_cut = pcd_np[np.where(np.abs(pcd_np)[:,0]<0.3)[0]]
+        pcd_cut = pcd_np[np.where(np.abs(pcd_np)[:,1] < 0.15)[0]]
+    return pcd_cut
+
+
+def load_model(name):
+    if name == "couch":
+        plane = o3d.geometry.TriangleMesh.create_box(width=0.6, height=0.3, depth=0.001)
+        plane.translate((-0.3, -0.15, 0))
+    return plane
+
+
 class ObjectInfo:
     ##
     # @param name   name of object
